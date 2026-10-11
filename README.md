@@ -10,7 +10,7 @@ Three things, in order of how interesting they are:
 
 1. **Semantic player search** — every player is represented as a 24-feature vector. "Find me a cheaper Saka" is a nearest-neighbour query using [pgvector](https://github.com/pgvector/pgvector).
 2. **Three-advisor scoring** — every player gets three 0–10 scores (Form, Fixtures, Value) plus a combined score, with the reasoning behind each.
-3. **LLM-facing tools** — clean, filtered, JSON-friendly functions an LLM can call. The LLM picks the tool, we return the numbers.
+3. **LLM-facing tools** — three clean, filtered, JSON-friendly functions an LLM can call over HTTP *and* MCP. The LLM picks the tool, we return the numbers.
 
 ## Architecture
 
@@ -40,7 +40,8 @@ The "AI agent" is the LLM at the top. Everything below it is plain Python. This 
 - **Python 3.14**, **FastAPI**
 - **PostgreSQL 18 + pgvector** (via Docker)
 - **SQLAlchemy 2.0**, psycopg2, pydantic-settings
-- **fastapi-mcp 0.4.0** for MCP (spec 2025-11-25, Streamable HTTP)
+- **fastapi-mcp 0.4.0** for MCP (Streamable HTTP), pinned to **mcp>=1.12.0,<2** — fastapi-mcp 0.4.0 is not compatible with the mcp 2.x SDK
+- **uvicorn** as the ASGI server
 - Direct API calls — no CrewAI, no LangGraph
 
 ## Getting started
@@ -73,7 +74,7 @@ DATABASE_URL=postgresql+psycopg2://<user>:<password>@localhost:5434/<db>
 ```bash
 python -m venv cochee-venv
 cochee-venv\Scripts\activate      # Windows
-pip install sqlalchemy psycopg2-binary pgvector pydantic pydantic-settings requests
+pip install -r requirements.txt
 ```
 
 ### 4. Set up the database
@@ -98,29 +99,53 @@ python -m scripts.embed
 python -m scripts.test_tools
 ```
 
+### 6. Run the API + MCP server
+
+```bash
+uvicorn app.main:app --reload
+```
+
+- HTTP routes: `http://127.0.0.1:8000/tools/*` (Postman-friendly)
+- API docs: `http://127.0.0.1:8000/docs`
+- MCP endpoint: `http://127.0.0.1:8000/mcp`
+
+Verify the MCP menu:
+
+```bash
+python mcp_test.py
+```
+
+Expected: three tools — `top_players`, `similar_players`, `compare_players`.
+
 ## Project layout
 
 ```
 cochee/
 ├── app/
+│   ├── main.py            FastAPI app + MCP mount
 │   ├── database.py        Engine, session factory, base class
-│   ├── models.py          Team, Gameweek, Fixture, Player (with Vector(24))
+│   ├── models.py          Team, Gameweek, Fixture, Player (with Vector(24), search_name)
 │   ├── fpl_client.py      FPL API calls with retries and backoff
 │   ├── ingest.py          Cleans and upserts FPL data into Postgres
 │   ├── embeddings.py      Computes the 24-feature vector per player
-│   ├── tools.py           LLM-facing tools (get_top_players, find_similar_players)
+│   ├── tools.py           LLM-facing tools (get_top_players, find_similar_players, compare_players)
+│   ├── routers/
+│   │   ├── schemas.py     Pydantic request models
+│   │   ├── health.py      GET /health
+│   │   └── tools_router.py POST /tools/* — the three tool endpoints
 │   └── advisors/
 │       ├── common.py      Shared helpers (min_max, scale, weighted_score)
 │       ├── form.py        Form advisor
 │       ├── fixtures.py    Fixtures advisor
 │       ├── value.py       Value advisor
 │       └── combined.py    Combines the three into one score
-└── scripts/
-    ├── init_db.py         Create tables
-    ├── sync.py            Fetch from FPL and ingest
-    ├── embed.py           Compute embeddings
-    ├── check_db.py        Connection sanity check
-    └── test_*.py          One test per advisor and for the tools
+├── scripts/
+│   ├── init_db.py         Create tables
+│   ├── sync.py            Fetch from FPL and ingest
+│   ├── embed.py           Compute embeddings
+│   ├── check_db.py        Connection sanity check
+│   └── test_*.py          One test per advisor and for the tools
+└── mcp_test.py            Verifies the MCP menu (tools/list)
 ```
 
 ## Design decisions worth knowing
@@ -130,6 +155,8 @@ cochee/
 - **Position, availability, and price are hard filters, not preferences.** You cannot swap a striker for a midfielder in FPL — so similarity search must never compare across positions.
 - **Advisors score; callers filter.** Keeps advisors pure and reusable.
 - **Tools return small dicts, not ORM objects.** The LLM only needs a name, price, three scores, and a reason — not the full 40-column row.
+- **`search_name` column on `players`.** Concatenates first name, second name, and web name (lowercased). Enables token-based name search — `"Bruno Fernandes"` matches even when the DB stores `"B.Fernandes"`.
+- **Tools return status discriminators, not just data.** `find_similar_players` and `compare_players` return `{"status": "ok" | "partial" | "not_found" | "ambiguous", ...}`. The `ambiguous` case includes candidate players so the LLM can ask the user which one they meant — instead of the tool guessing.
 
 ## Rate limiting
 
