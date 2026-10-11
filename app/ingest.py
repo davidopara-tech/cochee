@@ -124,6 +124,7 @@ def _ingest_players(db, bootstrap: dict) -> int:
             "corners_and_indirect_freekicks_order": p.get(
                 "corners_and_indirect_freekicks_order"
             ),
+            "search_name": _build_search_name(p),
         }
         for p in bootstrap["elements"]
     ]
@@ -173,3 +174,14 @@ def sync_all() -> None:
         raise
     finally:
         db.close()
+
+
+def _build_search_name(p: dict) -> str:
+    """All the ways someone might refer to a player, lowercased and space-joined."""
+    parts = [
+        p.get("first_name", ""),
+        p.get("second_name", ""),
+        p.get("web_name", ""),
+        p.get("first_name", ""),
+    ]
+    return " ".join(part.strip().lower() for part in parts if part).strip()

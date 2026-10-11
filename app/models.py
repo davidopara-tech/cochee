@@ -23,7 +23,6 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
-from pgvector.sqlalchemy import Vector  
 
 # ---------------------------------------------------------------------------
 # DRY: TimestampMixin
@@ -268,14 +267,17 @@ class Player(TimestampMixin, Base):
     # FPL position code: 1=GK, 2=DEF, 3=MID, 4=FWD.
     # Stored as int to match FPL; the Position advisor maps it to a string.
     element_type: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-
+    search_name: Mapped[str] = mapped_column(String(200), index=True)
+    
     # --- Status / availability ---------------------------------------------
     # FPL status code: 'a'=available, 'i'=injured, 'd'=doubtful,
     # 's'=suspended, 'u'=unavailable, 'n'=on loan.
     # Cochee filters to status='a' for recommendations.
     status: Mapped[str] = mapped_column(String(2), nullable=False, index=True)
+    
     # Free-text injury/availability note from FPL. Null when fully fit.
     news: Mapped[str | None] = mapped_column(String(500), nullable=True)
+   
     # 0-100 percent chance of playing this round. NULL means 100% (FPL quirk).
     chance_of_playing_this_round: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chance_of_playing_next_round: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -360,6 +362,7 @@ class Player(TimestampMixin, Base):
     # Python-side shortcut: player.team gives us the Team object directly,
     # no manual join needed. back_populates pairs with Team.players.
     team: Mapped["Team"] = relationship(back_populates="players")
+    
 
     def __repr__(self) -> str:
         return f"<Player {self.id} {self.web_name} (team={self.team_id})>"
