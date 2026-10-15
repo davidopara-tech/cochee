@@ -264,6 +264,7 @@ class Player(TimestampMixin, Base):
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     second_name: Mapped[str] = mapped_column(String(100), nullable=False)
     web_name: Mapped[str] = mapped_column(String(100), nullable=False)  # "Salah"
+    
     # FPL position code: 1=GK, 2=DEF, 3=MID, 4=FWD.
     # Stored as int to match FPL; the Position advisor maps it to a string.
     element_type: Mapped[int] = mapped_column(Integer, nullable=False, index=True)

@@ -39,30 +39,33 @@ def top_players(request: TopPlayersRequest, db: Session = Depends(get_db)) -> di
 
 
 @router.post("/similar-players", operation_id="similar_players")
-def similar_players(request: SimilarPlayersRequest, db: Session = Depends(get_db)) -> dict:
+def similar_players(req: SimilarPlayersRequest, db: Session = Depends(get_db)) -> dict:
     """
     Find players statistically similar to a named player.
 
-    Use this when the user names one specific player and asks for
-    'players like X', 'similar to X', or 'replacements for X'.
+    Use this when the user names ONE specific player and asks for players
+    "like" them, "similar to" them, "replacements for" them, or "who plays
+    like X". Do NOT use this when the user gives no player name — use
+    top_players instead.
 
-    Returns one of three statuses:
-      - "ok": unique player found, similar players returned
-      - "ambiguous": name matches multiple players, returns candidates
-        for the user to choose from (ask them which one they meant)
+    Returns a dict with a "status" field:
+      - "ok": exactly one player matched, "players" list contains similar players
+      - "ambiguous": the name matches multiple players, "candidates" lists them
+        so you can ask the user which one they meant (include team and position
+        when asking)
       - "not_found": no player matches the name
+
+    Never raises an error. A missing player is a normal answer, not a failure.
     """
-    ...
     result = find_similar_players(
         db,
-        player_name=request.player_name,
-        same_position=request.same_position,
-        max_price=request.max_price,
-        limit=request.limit,
+        player_name=req.player_name,
+        same_position=req.same_position,
+        max_price=req.max_price,
+        limit=req.limit,
     )
-    if result["status"] == "not_found":
-        raise HTTPException(status_code=404, detail="No matching player found.")
     return result
+
 
 @router.post("/compare-players", operation_id="compare_players")
 def compare_players(request: ComparePlayerRequest, db: Session = Depends(get_db)) -> dict:

@@ -13,4 +13,4 @@ mcp = FastApiMCP(
     app,
     include_operations=["top_players", "similar_players", "compare_players"],
 )
-mcp.mount()
+mcp.mount_http()

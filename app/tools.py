@@ -31,6 +31,50 @@ def _team_id_by_name(db, code: str) -> int | None:
     return None
 
 
+def _find_one_player(db, name: str) -> dict:
+    """
+    Find a player by name. Two-tier search:
+      1. Word-boundary match (strict): each token must appear as a whole word.
+      2. Substring fallback (loose): only fires if step 1 found nothing.
+
+    Returns one of:
+      {"status": "ok", "player": <Player>}
+      {"status": "not_found"}
+      {"status": "ambiguous", "candidates": [{id, name, team, position}, ...]}
+    """
+    tokens = name.lower().split()
+    if len(tokens) == 0:
+        return {"status": "not_found"}
+
+    # Step 1: strict word-boundary match
+    conditions = [Player.search_name.op("~*")(f"\\y{token}\\y") for token in tokens]
+    matches = db.scalars(select(Player).where(*conditions)).all()
+
+    # Step 2: substring fallback if strict found nothing
+    if len(matches) == 0:
+        conditions = [Player.search_name.ilike(f"%{token}%") for token in tokens]
+        matches = db.scalars(select(Player).where(*conditions)).all()
+
+    if len(matches) == 0:
+        return {"status": "not_found"}
+    if len(matches) == 1:
+        return {"status": "ok", "player": matches[0]}
+
+    teams = _team_lookup(db)
+    return {
+        "status": "ambiguous",
+        "candidates": [
+            {
+                "id": p.id,
+                "name": p.web_name,
+                "team": teams.get(p.team_id, "?"),
+                "position": POSITIONS.get(p.element_type, "?"),
+            }
+            for p in matches[:5]
+        ],
+    }
+
+
 def get_top_players(
     db,
     position: int | None = None,
@@ -100,6 +144,7 @@ def get_top_players(
         for p in ranked
     ]
 
+
 def find_similar_players(
     db,
     player_name: str,
@@ -109,34 +154,20 @@ def find_similar_players(
 ) -> dict:
     """
     Find players statistically similar to the named player.
-    Returns a dict with a 'status' discriminator:
-      - {"status": "ok", "players": [...]}
-      - {"status": "ambiguous", "candidates": [...]}
-      - {"status": "not_found"}
+
+    Returns one of:
+      {"status": "ok", "players": [...]}
+      {"status": "ambiguous", "candidates": [...]}
+      {"status": "not_found"}
     """
-    tokens = player_name.lower().split()
-    if len(tokens) == 0:
+    lookup = _find_one_player(db, player_name)
+
+    if lookup["status"] == "not_found":
         return {"status": "not_found"}
-    conditions = [Player.search_name.op("~*")(f"\\y{token}\\y") for token in tokens]
+    if lookup["status"] == "ambiguous":
+        return {"status": "ambiguous", "candidates": lookup["candidates"]}
 
-    matches = db.scalars(
-        select(Player).where(*conditions)
-    ).all()
-
-    if len(matches) == 0:
-        return {"status": "not_found"}
-
-    if len(matches) > 1:
-        teams = _team_lookup(db)
-        return {
-            "status": "ambiguous",
-            "candidates": [
-            {"id": p.id, "name": p.web_name, "team": teams.get(p.team_id, "?"), "position": POSITIONS.get(p.element_type, "?")}
-            for p in matches[:5]
-            ],
-        }
-
-    target = matches[0]
+    target = lookup["player"]
 
     stmt = (
         select(Player)
@@ -168,117 +199,41 @@ def find_similar_players(
             for p in results
         ],
     }
-def _find_one_player(db, name: str) -> dict:
-    """Find a player by name. Returns:
-       {"status": "ok", "player": <Player>}
-       {"status": "not_found"}
-       {"status": "ambiguous", "candidates": [{id, name, team}, ...]}
-    """
-    tokens = name.lower().split()
-    if len(tokens) == 0:
-        return {"status": "not_found"}
-    conditions = [Player.search_name.op("~*")(f"\\y{token}\\y") for token in tokens]
-    matches = db.scalars(select(Player).where(*conditions)).all()
-
-    if len(matches) == 0:
-        return {"status": "not_found"}
-    if len(matches) == 1:
-        return {"status": "ok", "player": matches[0]}
-
-    teams = _team_lookup(db)
-    return {
-        "status": "ambiguous",
-        "candidates": [
-            {"id": p.id, "name": p.web_name, "team": teams.get(p.team_id, "?"),  "position": POSITIONS.get(p.element_type, "?"),}
-            for p in matches[:5]
-       ],
-    }
 
 
 def compare_players(db, names: list[str]) -> dict:
     """
     Compare 2-5 players side by side.
 
-    INPUT:
-        names = ["Palmer", "Salah", "Xyzzy"]
-
-    INTERMEDIATE DATA (built once, reused):
-
-        scores = {
-            12:  {"total": 6.9,  "form": 5.1,  "fixtures": 4.2,  "value": 7.8},
-            154: {"total": 8.1,  "form": 9.2,  "fixtures": 6.4,  "value": 7.8},
-            283: {"total": 7.8,  "form": 7.5,  "fixtures": 5.9,  "value": 8.4},
-            ...
-        }   # keyed by player.id
-
-        teams = {
-            1:  "ARS",
-            11: "LIV",
-            14: "MCI",
-            ...
-        }   # keyed by team_id
-
-    LOOP TRACE:
-        name = "Palmer"   → _find_one_player → {"status": "ok", ...} → found.append({...})
-        name = "Salah"    → _find_one_player → {"status": "ok", ...} → found.append({...})
-        name = "Xyzzy"    → _find_one_player → {"status": "not_found"} → missing.append("Xyzzy")
-
-    OUTPUT — one of three shapes:
-
-        # All matched
-        {
-            "status": "ok",
-            "players": [
-                {"name": "Palmer", "team": "CHE", "position": "MID", "price": 10.5,
-                 "total": 8.1, "form": 9.2, "fixtures": 6.4, "value": 7.8,
-                 "points": 142, "minutes": 1800, "ownership": 25.4},
-                {"name": "Salah",  "team": "LIV", "position": "MID", "price": 13.1,
-                 "total": 7.8, "form": 7.5, "fixtures": 5.9, "value": 8.4,
-                 "points": 155, "minutes": 1900, "ownership": 45.2},
-            ],
-        }
-
-        # Some matched, some didn't
-        {
-            "status": "partial",
-            "players": [ {...Palmer...}, {...Salah...} ],
-            "missing": ["Xyzzy"],
-            "ambiguous": [
-                {"query": "Smith", "candidates": [{"id": 1, "name": "Smith", "team": "ARS"}]}
-            ],
-        }
-
-        # None matched
-        {
-            "status": "not_found",
-            "missing": ["Xyzzy"],
-        }
+    Returns one of:
+      {"status": "ok", "players": [...]}
+      {"status": "partial", "players": [...], "missing": [...], "ambiguous": [...]}
+      {"status": "not_found", "missing": [...]}
     """
     names = list(dict.fromkeys(names))
     if len(names) < 2:
         return {"status": "not_found", "missing": names}
-    
-    #scores holds all the combined scores for 
-    # all players, so we can look up each player by ID
+
     scores = get_combined_scores(db)
     teams = _team_lookup(db)
 
     found = []
     missing = []
     ambiguous = []
-    for name in names:
-        result = _find_one_player(db, name)
 
-        if result["status"] == "not_found":
+    for name in names:
+        lookup = _find_one_player(db, name)
+
+        if lookup["status"] == "not_found":
             missing.append(name)
             continue
 
-        if result["status"] == "ambiguous":
-            ambiguous.append({"query": name, "candidates": result["candidates"]})
+        if lookup["status"] == "ambiguous":
+            ambiguous.append({"query": name, "candidates": lookup["candidates"]})
             continue
 
-        player = result["player"]
-        s = scores[player.id] #
+        player = lookup["player"]
+        s = scores[player.id]
         found.append({
             "name": player.web_name,
             "team": teams.get(player.team_id, "?"),
