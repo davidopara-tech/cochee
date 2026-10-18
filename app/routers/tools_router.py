@@ -2,9 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database  import get_db
-from app.schemas import SimilarPlayersRequest, TopPlayersRequest, ComparePlayerRequest
+from app.schemas import (
+    SimilarPlayersRequest,
+    TopPlayersRequest,
+    ComparePlayerRequest,
+    PlayerFixturesRequest,
+)
 from app.tools import compare_players as compare_players_tool
-from  app.tools import find_similar_players, get_top_players
+from app.tools import find_similar_players, get_top_players, get_player_fixtures
 
 router = APIRouter(prefix = "/tools",
                    tags = ["Tools"])
@@ -29,6 +34,7 @@ def top_players(request: TopPlayersRequest, db: Session = Depends(get_db)) -> di
         db,
         position = request.position,
         max_price = request.max_price,
+        min_price = request.min_price,
         limit = request.limit,
         weights = request.weights,
         team= request.team,
@@ -82,3 +88,27 @@ def compare_players(request: ComparePlayerRequest, db: Session = Depends(get_db)
     """
     ...
     return compare_players_tool(db, request.names)
+
+
+@router.post("/player-fixtures", operation_id="player_fixtures")
+def player_fixtures(request: PlayerFixturesRequest, db: Session = Depends(get_db)) -> dict:
+    """
+    Show a named player's upcoming fixtures.
+
+    Use this when the user asks 'who does X play next?', 'what are X's fixtures?',
+    'show me X's next games', or follows up on a previous answer by asking about
+    fixtures for a specific player.
+
+    Returns opponent, home/away, and FPL difficulty rating (1 = easiest, 5 = hardest)
+    for each of the next N gameweeks.
+
+    Status values:
+      - "ok": player found, fixtures returned
+      - "ambiguous": name matches multiple players, "candidates" lists them
+      - "not_found": no player matches the name
+    """
+    return get_player_fixtures(
+        db,
+        player_name=request.player_name,
+        num_gameweeks=request.num_gameweeks,
+    )

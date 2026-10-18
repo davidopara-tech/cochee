@@ -1,9 +1,9 @@
 """Tools the LLM can call. Each returns small, clean dicts (not ORM objects)."""
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.advisors.combined import get_combined_scores
-from app.models import Player, Team
+from app.models import Fixture, Player, Team
 
 POSITIONS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
@@ -12,14 +12,57 @@ def _team_lookup(db) -> dict[int, str]:
     """Returns {team_id: short_name} for translating to human-readable names."""
     return {t.id: t.short_name for t in db.scalars(select(Team)).all()}
 
+def _team_full_names(db) -> dict[int, str]:
+    """Returns {team_id: full_name} for human-readable output."""
+    return {t.id: t.name for t in db.scalars(select(Team)).all()}
+
+
+def _full_name(p: Player) -> str:
+    """Best human-readable name for a player. Falls back to web_name."""
+    if p.first_name and p.second_name:
+        return f"{p.first_name} {p.second_name}"
+    return p.web_name
+
+
+def _difficulty_label(rating: int) -> str:
+    """Plain-English label for FPL's 1-5 difficulty rating."""
+    if rating <= 2:
+        return "easy"
+    if rating == 3:
+        return "medium"
+    return "hard"
+
+
+def _phrase_form(score: float) -> str:
+    if score >= 8.0: return "in red-hot form"
+    if score >= 6.0: return "in strong form"
+    if score >= 4.0: return "in decent form"
+    if score >= 2.0: return "in patchy form"
+    return "out of form"
+
+
+def _phrase_fixtures(score: float) -> str:
+    if score >= 8.0: return "a very kind run of fixtures"
+    if score >= 6.0: return "a favourable run of fixtures"
+    if score >= 4.0: return "mixed fixtures"
+    if score >= 2.0: return "a tough run of fixtures"
+    return "a brutal run of fixtures"
+
+
+def _phrase_value(score: float) -> str:
+    if score >= 8.0: return "outstanding value"
+    if score >= 6.0: return "good value"
+    if score >= 4.0: return "fair value"
+    if score >= 2.0: return "poor value"
+    return "very expensive"
+
 
 def _reason(components: dict) -> str:
-    """One-line plain-English summary of a player's strongest and weakest metric."""
-    best = max(components, key=components.get)
-    worst = min(components, key=components.get)
-    if components[best] - components[worst] < 1.5:
-        return "well-rounded across form, fixtures, and value"
-    return f"strong on {best}, weak on {worst}"
+    """Football-language summary of a player's form, fixtures, and value."""
+    form = _phrase_form(components["form"])
+    fixtures = _phrase_fixtures(components["fixtures"])
+    value = _phrase_value(components["value"])
+    return f"{form.capitalize()}, {fixtures}, {value}."
 
 
 def _team_id_by_name(db, code: str) -> int | None:
@@ -66,7 +109,7 @@ def _find_one_player(db, name: str) -> dict:
         "candidates": [
             {
                 "id": p.id,
-                "name": p.web_name,
+                "name": _full_name(p),
                 "team": teams.get(p.team_id, "?"),
                 "position": POSITIONS.get(p.element_type, "?"),
             }
@@ -74,12 +117,12 @@ def _find_one_player(db, name: str) -> dict:
         ],
     }
 
-
 def get_top_players(
     db,
     position: int | None = None,
     team: str | None = None,
     max_price: int | None = None,
+    min_price: int | None = None,
     min_ownership: float | None = None,
     max_ownership: float | None = None,
     min_minutes: int = 0,
@@ -118,6 +161,7 @@ def get_top_players(
         and (min_ownership is None or p.selected_by_percent >= min_ownership)
         and (max_ownership is None or p.selected_by_percent <= max_ownership)
         and (max_price is None or p.now_cost <= max_price)
+        and (min_price is None or p.now_cost >= min_price)
         and p.minutes >= min_minutes
         and (not only_available or p.status == "a")
     ]
@@ -127,7 +171,7 @@ def get_top_players(
     return [
         {
             "id": p.id,
-            "name": p.web_name,
+            "name": _full_name(p),
             "team": teams.get(p.team_id, "?"),
             "position": POSITIONS.get(p.element_type, "?"),
             "price": round(p.now_cost / 10, 1),
@@ -235,7 +279,7 @@ def compare_players(db, names: list[str]) -> dict:
         player = lookup["player"]
         s = scores[player.id]
         found.append({
-            "name": player.web_name,
+            "name": _full_name(player),
             "team": teams.get(player.team_id, "?"),
             "position": POSITIONS.get(player.element_type, "?"),
             "price": round(player.now_cost / 10, 1),
@@ -258,3 +302,57 @@ def compare_players(db, names: list[str]) -> dict:
         return response
 
     return {"status": "ok", "players": found}
+
+def get_player_fixtures(db, player_name: str, num_gameweeks: int = 5) -> dict:
+    """
+    Return a player's upcoming fixtures with opponent, venue, and difficulty.
+
+    difficulty is FPL's own rating: 1 = easiest, 5 = hardest.
+    difficulty_label translates that to 'easy' / 'medium' / 'hard'.
+
+    Returns one of:
+      {"status": "ok", "player": ..., "team": ..., "fixtures": [...]}
+      {"status": "ambiguous", "candidates": [...]}
+      {"status": "not_found"}
+    """
+    lookup = _find_one_player(db, player_name)
+    if lookup["status"] != "ok":
+        return lookup
+
+    player = lookup["player"]
+    short = _team_lookup(db)
+    full = _team_full_names(db)
+
+    rows = db.scalars(
+        select(Fixture)
+        .where(
+            or_(
+                Fixture.home_team_id == player.team_id,
+                Fixture.away_team_id == player.team_id,
+            ),
+            Fixture.finished.is_(False),
+            Fixture.gameweek_id.is_not(None),
+        )
+        .order_by(Fixture.gameweek_id)
+        .limit(num_gameweeks)
+    ).all()
+
+    fixtures = []
+    for f in rows:
+        is_home = f.home_team_id == player.team_id
+        opponent_id = f.away_team_id if is_home else f.home_team_id
+        difficulty = f.team_h_difficulty if is_home else f.team_a_difficulty
+        fixtures.append({
+            "gameweek": f.gameweek_id,
+            "opponent": full.get(opponent_id, short.get(opponent_id, "?")),
+            "venue": "home" if is_home else "away",
+            "difficulty": difficulty,
+            "difficulty_label": _difficulty_label(difficulty),
+        })
+
+    return {
+        "status": "ok",
+        "player": _full_name(player),
+        "team": full.get(player.team_id, short.get(player.team_id, "?")),
+        "fixtures": fixtures,
+    }

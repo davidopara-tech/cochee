@@ -11,6 +11,6 @@ app.include_router(tools_router)
 
 mcp = FastApiMCP(
     app,
-    include_operations=["top_players", "similar_players", "compare_players"],
+    include_operations=["top_players", "similar_players", "compare_players", "player_fixtures"],
 )
 mcp.mount_http()

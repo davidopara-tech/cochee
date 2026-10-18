@@ -14,6 +14,11 @@ class TopPlayersRequest(BaseModel):
         default=None, gt=0,
         description="Maximum price in tenths of a million (85 = £8.5m). Omit for no cap."
     )
+    min_price: int | None = Field(
+        default=None, gt=0,
+        description="Minimum price in tenths of a million (80 = £8.0m). Omit for no minimum."
+    )
+    
     min_ownership: float | None = Field(
         default=None, ge=0, le=100,
         description="Minimum ownership percent (0-100). Omit for no minimum."
@@ -28,7 +33,7 @@ class TopPlayersRequest(BaseModel):
         description="Optional weights e.g. {'form': 0.5, 'fixtures': 0.3, 'value': 0.2}. Omit for defaults."
     )
 
-      
+
 class SimilarPlayersRequest(BaseModel):
     player_name: str = Field(min_length=2)
     same_position: bool = True
@@ -38,3 +43,14 @@ class SimilarPlayersRequest(BaseModel):
 
 class ComparePlayerRequest(BaseModel):
     names : list[str] = Field(min_length=2, max_length=5)
+
+
+class PlayerFixturesRequest(BaseModel):
+    player_name: str = Field(
+        min_length=2,
+        description="Player name to look up. Examples: 'Haaland', 'Salah', 'Bruno Fernandes'."
+    )
+    num_gameweeks: int = Field(
+        default=5, ge=1, le=10,
+        description="How many upcoming fixtures to return. Defaults to 5."
+    )
