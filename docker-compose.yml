@@ -35,6 +35,17 @@ services:
       retries: 15
       start_period: 90s
 
+  scheduler:
+    build: .
+    image: cochee-app
+    container_name: cochee-scheduler
+    entrypoint: ["python", "-m", "scripts.scheduler"]
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    depends_on:
+      db:
+        condition: service_healthy
+
   client:
     build: .
     image: cochee-app
