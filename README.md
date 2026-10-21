@@ -1,177 +1,164 @@
 # Cochee
 
-A conversational FPL advisor for the Amazon Developer Hackathon 2026 (Alexa+ track).
+Cochee is a conversational AI agent for Fantasy Premier League (FPL) that helps managers make more informed decisions about player selection, captaincy, and upcoming fixtures.
 
-Cochee answers FPL questions like *"I've got £8.5m — who's the best midfielder to bring in?"* by finding players through semantic similarity and scoring them from three perspectives: **Form**, **Fixtures**, and **Value**.
+With over 11 million players competing in FPL, making decisions involves weighing factors such as player form, fixture difficulty, and price. General-purpose LLMs can explain football concepts, but their training data alone cannot reliably provide current, data-backed FPL recommendations.
 
-## What it does
+Cochee addresses this by combining an LLM with tools backed by an FPL database. The model interprets questions, selects the relevant tools, and explains the results, while deterministic scoring logic handles player evaluation. This keeps recommendations grounded in application data rather than relying solely on the model's pretrained knowledge.
 
-Three things, in order of how interesting they are:
+Built for the Alexa+ track of the Amazon Developer Hackathon 2026.
+---
 
-1. **Semantic player search** — every player is represented as a 24-feature vector. "Find me a cheaper Saka" is a nearest-neighbour query using [pgvector](https://github.com/pgvector/pgvector).
-2. **Three-advisor scoring** — every player gets three 0–10 scores (Form, Fixtures, Value) plus a combined score, with the reasoning behind each.
-3. **LLM-facing tools** — three clean, filtered, JSON-friendly functions an LLM can call over HTTP *and* MCP. The LLM picks the tool, we return the numbers.
+## How it works
 
-## Architecture
+The LLM doesn't query the database directly. It requests tools through an MCP client, while the application handles data retrieval and player scoring.
 
-Cochee is deliberately split into three layers:
-
-```
-┌────────────────────────────────────────────┐
-│  Conversation (Alexa+ / LLM)               │   ← the AI
-│  Understands the user, picks tools         │
-└──────────────────┬─────────────────────────┘
-                   │ MCP
-┌──────────────────▼─────────────────────────┐
-│  Orchestration (MCP server)                │   ← the interface
-│  Exposes tools to the LLM                  │
-└──────────────────┬─────────────────────────┘
-                   │ function calls
-┌──────────────────▼─────────────────────────┐
-│  Computation (advisors, embeddings)        │   ← the math
-│  Deterministic, testable, no AI            │
-└────────────────────────────────────────────┘
+```text
+User question
+     ↓
+LLM (Groq / gpt-oss-120b)
+     ↓ tool request
+MCP client (llm_client.py)
+     ↓
+MCP server (FastAPI-MCP)
+     ↓
+Tools: top_players, similar_players,
+       compare_players, player_fixtures
+     ↓
+Application logic and scoring advisors
+     ↓
+PostgreSQL + pgvector
+(668 players, 380 fixtures, 24-feature vectors)
 ```
 
-The "AI agent" is the LLM at the top. Everything below it is plain Python. This keeps the system fast, cheap, and debuggable.
+The system separates three responsibilities:
+
+1. **Computation** — Scoring advisors evaluate players based on form, fixtures, and value using deterministic logic rather than an LLM.
+
+2. **Tool execution** — The MCP server exposes the available tools. The client passes tool requests to the server and returns their results to the LLM.
+
+3. **Conversation** — The LLM interprets the manager's question, selects relevant tools, uses their results, and explains the answer in natural language.
+
+This separation keeps player scoring in application code rather than relying on the LLM to perform calculations. The scoring logic is repeatable and easier to test, while the LLM handles the flexible, conversational interface.
+```
+
+---
+
+#### The four tools
+
+| Tool | What it's for |
+|---|---|
+| `top_players` | Rank players using filters such as position, team, price, ownership, and scoring weights. |
+| `similar_players` | Find statistically similar players using pgvector. |
+| `compare_players` | Compare 2–5 players side by side using the same metrics. |
+| `player_fixtures` | Show a player's upcoming fixtures and their difficulty ratings. |
+
+Every tool returns a `reason` field containing a pre-built, one-line explanation of its result. This gives the LLM a grounded explanation to work with instead of generating every justification from scratch. It's a simple way to reduce unsupported reasoning.
+
+---
+
+## ## Four challenges that changed the design
+
+**1. MCP transport mismatch — `405 Method Not Allowed`**
+
+The MCP client used Streamable HTTP, but the server was mounted using an SSE-based transport. Requests failed with `405 Method Not Allowed`. After tracing the issue, I found that `fastapi-mcp`'s `mount()` method was deprecated for my setup and `mount_http()` was the correct replacement. One line changed, and the pipeline started working.
+
+This was where I learned that an MCP transport isn't just a configuration detail. The client and server need to communicate using compatible transport mechanisms.
+
+**2. The LLM invented first names**
+
+My tool returned `web_name`, which contained names like `Palmer`. The LLM sometimes expanded these into full names, such as "Joe Palmer" or "James Gibbs-White," even when the names were incorrect.
+
+I changed the tool to return `first_name` and `second_name`, giving the model the complete player name from the source data.
+
+The lesson: sometimes, the LLM makes mistakes because the information you give it is incomplete. Providing the correct, complete data reduces the need for it to guess.
+
+**3. Captaincy recommendations exposed a scoring-design problem**
+
+`top_players` initially weighted form, fixtures, and value equally. Because the value score favored cheaper players, a £5m defender could rank highly as a captaincy option, but defenders arent the idle picks for captains.
+
+The scoring logic was doing what I had designed it to do. The problem was that the weights didn't match the decision being made.
+
+I added a `min_price` filter and configured captaincy questions to prioritize form and fixtures, with value weighted at zero:
+
+`{form: 0.5, fixtures: 0.5, value: 0.0}`
+
+The lesson: a scoring model can be mathematically consistent and still produce poor recommendations when its objective doesn't match the user's intent.
+
+**4. Making tool calls more resilient**
+
+Groq's `gpt-oss-120b` occasionally returned malformed tool-call names containing internal control tokens, such as `top_players<|channel|>commentary`. This caused the API request to fail and could leave the user with a traceback.
+
+I added error handling for `BadRequestError` and `APIConnectionError`, with a single retry for the relevant failures. This also helps recover from stale HTTP connections after idle periods.
+
+The lesson: a working agent needs more than a successful tool call. It also needs controlled failure handling so that occasional API or connection errors don't unnecessarily crash the user-facing application.
+
+---
+
+## How to run it
+
+### With Docker (recommended)
+
+Requires Docker and a free Groq API key.
+
+```bash
+git clone https://github.com/davidopara-tech/cochee.git
+cd cochee
+
+# 1. Copy the env template and add your Groq key
+cp .env.example .env
+# edit .env → paste your key from https://console.groq.com
+
+# 2. Start database + server (first run builds the image + syncs data)
+docker compose up
+
+# 3. In a second terminal — interactive agent
+docker compose run --rm client
+
+The agent is now interactive. Ask it an FPL question — anything from
+"who should I captain?" to "find me a cheap midfielder" to "compare Saka
+and Palmer". Type `quit` to exit.
+
+---
+
+## Data ingestion
+
+`scripts/scheduler.py` refreshes FPL data every 4 hours. It runs `sync` (fetch
+from the FPL API) then `embed` (recompute vectors), logging to both stdout and
+`scheduler.log`. On a 429 it honours `Retry-After`. On transient failures it
+retries next cycle. On fatal bugs it exits so the failure isn't silently
+retried forever.
+
+Run with `python -m scripts.scheduler`. Stop with Ctrl+C.
+
+I considered a tiered design (static / matchday / on-demand) and rejected it.
+Live in-match polling adds 200+ lines of matchday-detection logic and a class
+of bugs that only appear during live matches. FPL decisions happen before the
+deadline. Four hours is right-sized for the product.
+
+---
+
+## What's not built
+
+- **Personal squad integration.** The FPL `my-team` endpoint requires session
+  cookies, which means storing FPL credentials. Two to four hours of work and a
+  new class of security questions. Out of scope for a hackathon build.
+
+- **Persistent conversation history.** The LLM remembers your team for the
+  current session. Close the script and it forgets.
+  
+- **Dev-tier headroom.** Groq's free tier caps at 200K tokens/day, which is
+  tight for long test sessions. A one-off $5 dev tier removes this.
+
+---
 
 ## Stack
 
-- **Python 3.14**, **FastAPI**
-- **PostgreSQL 18 + pgvector** (via Docker)
-- **SQLAlchemy 2.0**, psycopg2, pydantic-settings
-- **fastapi-mcp 0.4.0** for MCP (Streamable HTTP), pinned to **mcp>=1.12.0,<2** — fastapi-mcp 0.4.0 is not compatible with the mcp 2.x SDK
-- **uvicorn** as the ASGI server
-- Direct API calls — no CrewAI, no LangGraph
+Python 3.14 · FastAPI · PostgreSQL 18 + pgvector · SQLAlchemy 2.0
+· fastapi-mcp 0.4.0 · Groq (`gpt-oss-120b`)
 
-## Getting started
-
-### 1. Start the database
-
-```bash
-docker run -d --name cochee-pg \
-  -e POSTGRES_USER=<your-user> \
-  -e POSTGRES_PASSWORD=<your-password> \
-  -e POSTGRES_DB=<your-db> \
-  -p 5434:5432 \
-  pgvector/pgvector:pg18
-```
-
-The image ships with pgvector pre-installed. Port 5434 is used in this project because 5432 and 5433 are commonly occupied by a local Postgres or another container.
-
-> **Note:** In local development, we use `cochee` for the user, password, and database name. Real deployments should inject these from a secrets manager. The actual `.env` file is listed in `.gitignore` and must never be committed.
-
-### 2. Configure environment
-
-Create `.env` at the project root:
-
-```
-DATABASE_URL=postgresql+psycopg2://<user>:<password>@localhost:5434/<db>
-```
-
-### 3. Install dependencies
-
-```bash
-python -m venv cochee-venv
-cochee-venv\Scripts\activate      # Windows
-pip install -r requirements.txt
-```
-
-### 4. Set up the database
-
-```bash
-# Register the pgvector extension (once per container)
-docker exec -it cochee-pg psql -U <user> -d <db> -c "CREATE EXTENSION IF NOT EXISTS vector;"
-
-# Create tables
-python -m scripts.init_db
-
-# Fetch data from the FPL API (20 teams, 38 gameweeks, 667 players, 380 fixtures)
-python -m scripts.sync
-
-# Compute the 24-feature embedding for every player
-python -m scripts.embed
-```
-
-### 5. Try the tools
-
-```bash
-python -m scripts.test_tools
-```
-
-### 6. Run the API + MCP server
-
-```bash
-uvicorn app.main:app --reload
-```
-
-- HTTP routes: `http://127.0.0.1:8000/tools/*` (Postman-friendly)
-- API docs: `http://127.0.0.1:8000/docs`
-- MCP endpoint: `http://127.0.0.1:8000/mcp`
-
-Verify the MCP menu:
-
-```bash
-python mcp_test.py
-```
-
-Expected: three tools — `top_players`, `similar_players`, `compare_players`.
-
-## Project layout
-
-```
-cochee/
-├── app/
-│   ├── main.py            FastAPI app + MCP mount
-│   ├── database.py        Engine, session factory, base class
-│   ├── models.py          Team, Gameweek, Fixture, Player (with Vector(24), search_name)
-│   ├── fpl_client.py      FPL API calls with retries and backoff
-│   ├── ingest.py          Cleans and upserts FPL data into Postgres
-│   ├── embeddings.py      Computes the 24-feature vector per player
-│   ├── tools.py           LLM-facing tools (get_top_players, find_similar_players, compare_players)
-│   ├── routers/
-│   │   ├── schemas.py     Pydantic request models
-│   │   ├── health.py      GET /health
-│   │   └── tools_router.py POST /tools/* — the three tool endpoints
-│   └── advisors/
-│       ├── common.py      Shared helpers (min_max, scale, weighted_score)
-│       ├── form.py        Form advisor
-│       ├── fixtures.py    Fixtures advisor
-│       ├── value.py       Value advisor
-│       └── combined.py    Combines the three into one score
-├── scripts/
-│   ├── init_db.py         Create tables
-│   ├── sync.py            Fetch from FPL and ingest
-│   ├── embed.py           Compute embeddings
-│   ├── check_db.py        Connection sanity check
-│   └── test_*.py          One test per advisor and for the tools
-└── mcp_test.py            Verifies the MCP menu (tools/list)
-```
-
-## Design decisions worth knowing
-
-- **Primary keys are FPL's own IDs.** This makes re-ingestion a clean `INSERT ... ON CONFLICT DO UPDATE` instead of a delete-and-recreate.
-- **All 24 features are min-max scaled to [0, 1].** Without scaling, price (`156`) would dominate distance math over xG/90 (`0.45`).
-- **Position, availability, and price are hard filters, not preferences.** You cannot swap a striker for a midfielder in FPL — so similarity search must never compare across positions.
-- **Advisors score; callers filter.** Keeps advisors pure and reusable.
-- **Tools return small dicts, not ORM objects.** The LLM only needs a name, price, three scores, and a reason — not the full 40-column row.
-- **`search_name` column on `players`.** Concatenates first name, second name, and web name (lowercased). Enables token-based name search — `"Bruno Fernandes"` matches even when the DB stores `"B.Fernandes"`.
-- **Tools return status discriminators, not just data.** `find_similar_players` and `compare_players` return `{"status": "ok" | "partial" | "not_found" | "ambiguous", ...}`. The `ambiguous` case includes candidate players so the LLM can ask the user which one they meant — instead of the tool guessing.
-
-## Rate limiting
-
-The FPL API has no published rate limit, and community reports suggest aggressive polling triggers HTTP 429s. Cochee's plan:
-
-- **Background scheduler** refreshes data on a tiered schedule (hot / warm / cold / frozen).
-- **User requests never hit the FPL API directly** — they read from our own database.
-- Roughly 30 API calls per day regardless of user count.
-
-The scheduler is not yet implemented; the current `scripts/sync.py` is the manual equivalent.
+---
 
 ## License
 
-MIT — see `LICENSE`.
-
-## Acknowledgements
-
-Built for the **Amazon Developer Hackathon 2026** (Alexa+ track). Uses the public [Fantasy Premier League API](https://fantasy.premierleague.com/api/bootstrap-static/) — not affiliated with the Premier League.
+MIT — see [LICENSE](LICENSE).

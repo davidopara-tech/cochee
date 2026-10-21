@@ -1,0 +1,14 @@
+.env
+*.log
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+.venv/
+cochee-venv/
+.idea/
+.vscode/
+scheduler.log
+*.md
+!README.md

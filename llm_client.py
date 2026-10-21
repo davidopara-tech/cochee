@@ -14,7 +14,7 @@ from llm_tools import to_groq_tool
 
 load_dotenv()
 
-MCP_URL = "http://127.0.0.1:8000/mcp"
+MCP_URL = os.environ.get("MCP_URL", "http://127.0.0.1:8000/mcp")
 MODEL = "openai/gpt-oss-120b"
 groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
@@ -46,6 +46,7 @@ SYSTEM_PROMPT = (
     "For non-captain questions, do not pass weights or min_price. "
     "\n\n"
     "Use player_fixtures when the user asks about a specific player's upcoming games."
+        "For greetings or small talk (hi, hello, thanks), reply briefly and invite an FPL question — do NOT call any tools. "
 )
 
 
@@ -93,28 +94,47 @@ async def main() -> None:
 
                 messages.append({"role": "user", "content": user_input})
 
-                while True:
-                    reply = ask_groq(messages, groq_tools)
-                    msg = reply.choices[0].message
-                    messages.append(msg)
+                try:
+                    while True:
+                        reply = ask_groq(messages, groq_tools)
+                        msg = reply.choices[0].message
+                        messages.append(msg)
 
-                    if not msg.tool_calls:
-                        print(f"\nCochee: {msg.content}\n")
-                        break
+                        if not msg.tool_calls:
+                            print(f"\nCochee: {msg.content}\n")
+                            break
 
-                    for tool_call in msg.tool_calls:
-                        tool_name = tool_call.function.name
-                        arguments = json.loads(tool_call.function.arguments)
-                        arguments = {k: v for k, v in arguments.items() if v is not None}
+                        for tool_call in msg.tool_calls:
+                            tool_name = tool_call.function.name
+                            arguments = json.loads(tool_call.function.arguments)
+                            arguments = {k: v for k, v in arguments.items() if v is not None}
 
-                        result = await session.call_tool(tool_name, arguments)
-                        result_text = result.content[0].text
+                            result = await session.call_tool(tool_name, arguments)
+                            result_text = result.content[0].text
 
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": result_text,
-                        })
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": result_text,
+                            })
+
+                except groq.RateLimitError:
+                    print(
+                        "\n[Daily token limit reached. Groq's free tier caps at "
+                        "200K tokens/day. Try again tomorrow, or upgrade at "
+                        "https://console.groq.com/settings/billing]\n"
+                    )
+                    return
+                except groq.AuthenticationError:
+                    print(
+                        "\n[Invalid Groq API key. Check GROQ_API_KEY in .env]\n"
+                    )
+                    return
+                except groq.APIConnectionError:
+                    print(
+                        "\n[Cannot reach Groq. Check your internet connection.]\n"
+                    )
+                    return
 
 
 if __name__ == "__main__":
